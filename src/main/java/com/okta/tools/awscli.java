@@ -13,6 +13,7 @@
 package com.okta.tools;
 
 import com.amazonaws.AmazonClientException;
+import com.amazonaws.ClientConfiguration;
 import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.auth.BasicSessionCredentials;
 import com.amazonaws.auth.profile.ProfilesConfigFile;
@@ -38,7 +39,9 @@ import com.okta.sdk.framework.ApiClientConfiguration;
 import com.okta.sdk.models.auth.AuthResult;
 import com.okta.sdk.models.factors.Factor;
 import org.apache.commons.codec.binary.Base64;
+import org.apache.http.HttpHost;
 import org.apache.http.client.ClientProtocolException;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
@@ -83,7 +86,30 @@ public class awscli {
     private static int selectedPolicyRank; //the zero-based rank of the policy selected in the selected cross-account role (in case there is more than one policy tied to the current policy)
     private static final Logger logger = LogManager.getLogger(awscli.class);
 
+    // SDL-388
+    private static boolean useProxy = false;
+    private static String proxyHost = null;
+    private static int proxyPort = -1;
+    private static String proxyScheme = null;
+
     public static void main(String[] args) throws Exception {
+        // SDL-388
+        proxyHost = System.getProperties().getProperty("http.proxyHost");
+        if (proxyHost != null) {
+            String proxyPortAsString = System.getProperties().getProperty("http.proxyPort");
+            proxyPort = Integer.parseInt(proxyPortAsString);
+            proxyScheme = "http";
+            useProxy = true;
+        } else {
+            proxyHost = System.getProperties().getProperty("https.proxyHost");
+            if (proxyHost != null) {
+                String proxyPortAsString = System.getProperties().getProperty("https.proxyPort");
+                proxyPort = Integer.parseInt(proxyPortAsString);
+                proxyScheme = "https";
+                useProxy = true;
+            }
+        }
+
         awsSetup();
         extractCredentials();
 
@@ -186,6 +212,13 @@ public class awscli {
         httpost.addHeader("Accept", "application/json");
         httpost.addHeader("Content-Type", "application/json");
         httpost.addHeader("Cache-Control", "no-cache");
+
+        // SDL-388
+        if (useProxy) {
+            HttpHost proxy = new HttpHost(proxyHost, proxyPort, proxyScheme);
+            RequestConfig config = RequestConfig.custom().setProxy(proxy).build();
+            httpost.setConfig(config);
+        }
 
         //construction of request JSON
         JSONObject jsonObjRequest = new JSONObject();
@@ -342,6 +375,14 @@ public class awscli {
         // Part 2: Get the Identity Provider and Role ARNs.
         // Request for AWS SAML response containing roles
         httpget = new HttpGet(oktaAWSAppURL + "?onetimetoken=" + oktaSessionToken);
+
+        // SDL-388
+        if (useProxy) {
+            HttpHost proxy = new HttpHost(proxyHost, proxyPort, proxyScheme);
+            RequestConfig config = RequestConfig.custom().setProxy(proxy).build();
+            httpget.setConfig(config);
+        }
+
         responseSAML = httpClient.execute(httpget);
         samlFailHandler(responseSAML.getStatusLine().getStatusCode(), responseSAML);
 
@@ -414,7 +455,17 @@ public class awscli {
         BasicAWSCredentials awsCreds = new BasicAWSCredentials("", "");
 
         //use user credentials to assume AWS role
-        AWSSecurityTokenServiceClient stsClient = new AWSSecurityTokenServiceClient(awsCreds);
+
+        // SDL-388
+        AWSSecurityTokenServiceClient stsClient;
+        if (useProxy) {
+            ClientConfiguration clientConfiguration = new ClientConfiguration();
+            clientConfiguration.setProxyHost(proxyHost);
+            clientConfiguration.setProxyPort(proxyPort);
+            stsClient = new AWSSecurityTokenServiceClient(awsCreds, clientConfiguration);
+        } else {
+            stsClient = new AWSSecurityTokenServiceClient(awsCreds);
+        }
 
         AssumeRoleWithSAMLRequest assumeRequest = new AssumeRoleWithSAMLRequest()
                 .withPrincipalArn(principalArn)
@@ -1425,7 +1476,9 @@ public class awscli {
                 System.out.print("Password: ");
             }
             try {
+                System.out.println("Calling authnticateCredentials");
                 authResult = authenticateCredentials(oktaUsername, oktaPassword);
+                System.out.println("Finished calling authnticateCredentials");
                 strAuthStatus = authResult.getStatus();
 
                 if (strAuthStatus.equalsIgnoreCase("MFA_REQUIRED")) {
